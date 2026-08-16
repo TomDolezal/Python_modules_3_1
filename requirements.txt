@@ -1,0 +1,4 @@
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+rainflow>=3.2   # only needed for the RainflowDOD metric in select_representative_window
