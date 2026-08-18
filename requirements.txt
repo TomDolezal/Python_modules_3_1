@@ -3,3 +3,5 @@ pandas>=2.0
 scipy>=1.10
 openpyxl>=3.1  # required for cell_model_io.py (Excel cell-model loader)
 rainflow>=3.2   # only needed for the RainflowDOD metric in select_representative_window
+matplotlib>=3.7  # only needed for examples/demo_pipeline.ipynb
+jupyter>=1.0      # only needed to run examples/demo_pipeline.ipynb
