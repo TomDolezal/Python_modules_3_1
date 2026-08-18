@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .mypy_cache/
 venv/
+tests/
+sample_data/PVBESS_Greedy.csv

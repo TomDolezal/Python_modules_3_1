@@ -7,10 +7,8 @@ Runnable directly:
 
     python test_cell_model_io.py
 
-Uses the sample workbook shipped alongside this repo (see
-sample_data/README or ask for a copy of
-sample_cell_model_from_mat_2.xlsx) -- update SAMPLE_XLSX below if you
-keep it somewhere else.
+Uses the sample workbook shipped alongside this repo
+(sample_data/sample_cell_model.xlsx).
 """
 
 import sys
@@ -23,12 +21,12 @@ import openpyxl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from cell_model_io import load_cell_model_xlsx
+from cell_model_io import load_cell_model_xlsx, make_sim_cell_model
 from profile_generation import run_battery_model
-from _pg_helpers import make_sim_cell_model, apply_default_options, apply_default_datasheet
+from _pg_helpers import apply_default_options, apply_default_datasheet
 
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "..", "sample_data",
-                            "sample_cell_model_from_mat_2.xlsx")
+                            "sample_cell_model.xlsx")
 
 
 def _require_sample():
@@ -41,24 +39,21 @@ def _require_sample():
 
 def test_load_matches_raw_values():
     _require_sample()
-    result = load_cell_model_xlsx(SAMPLE_XLSX)
-    cm = result.cell_model
+    cm = load_cell_model_xlsx(SAMPLE_XLSX)
 
-    assert list(cm["TEMP"]) == [-5, 5, 15, 25, 35]
-    assert cm["R0"].shape == (len(cm["SOC"]), len(cm["TEMP"]))
-    assert np.isclose(cm["SOC"][0], 0.0) and np.isclose(cm["SOC"][-1], 1.0)
-    assert np.isclose(cm["OCV0"][0], 2.007235714286429)
-    assert np.isclose(cm["R0"][0, 0], 0.1186778504399855)     # SOC=0, T=-5C
-    assert np.isclose(cm["R0"][-1, -1], 0.04657745559314928)  # SOC=1, T=35C
-    assert np.isclose(cm["Q"][0], 3.365)
-    assert result.datasheet_meta.get("type") == "prismatic"
+    assert np.isclose(cm.soc[0], 0.0) and np.isclose(cm.soc[-1], 1.0)
+    assert cm.ocv.shape == cm.soc.shape
+    assert cm.r0.shape == cm.soc.shape
+    assert np.isclose(cm.ocv[0], 2.007235714286429)
+    assert np.isclose(cm.capacity_Ah, 3.35)
+    assert cm.datasheet_meta.get("type") == "prismatic"
     print("PASS: loaded values match the raw workbook exactly")
 
 
 def test_end_to_end_simulation_with_real_cell_model():
     _require_sample()
-    result = load_cell_model_xlsx(SAMPLE_XLSX)
-    sim_model = make_sim_cell_model(result.cell_model)
+    cm = load_cell_model_xlsx(SAMPLE_XLSX)
+    sim_model = make_sim_cell_model(cm)
 
     rng = np.random.default_rng(3)
     n = 300
@@ -92,20 +87,21 @@ def test_missing_required_sheet():
     print("PASS: missing required sheet raises a clear ValueError")
 
 
-def test_mismatched_temperature_columns():
+def test_extra_r0_column_rejected():
     _require_sample()
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "bad_cols.xlsx")
+        path = os.path.join(tmp, "extra_col.xlsx")
         shutil.copy(SAMPLE_XLSX, path)
         wb = openpyxl.load_workbook(path)
-        wb["R0"].delete_cols(6)  # drop one temperature column
+        wb["R0"].cell(row=1, column=3, value="R0_extra")
+        wb["R0"].cell(row=2, column=3, value=0.1)
         wb.save(path)
         try:
             load_cell_model_xlsx(path)
             raise AssertionError("should have raised")
         except ValueError as e:
-            assert "temperature columns" in str(e)
-    print("PASS: mismatched R0/TEMP_C column count raises a clear ValueError")
+            assert "resistance column" in str(e)
+    print("PASS: more than one R0 column raises a clear ValueError")
 
 
 def test_mismatched_soc_grid():
@@ -124,20 +120,24 @@ def test_mismatched_soc_grid():
     print("PASS: mismatched SOC grid between OCV and R0 raises a clear ValueError")
 
 
-def test_missing_temp_c_row():
+def test_missing_capacity_row():
     _require_sample()
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "no_temp.xlsx")
+        path = os.path.join(tmp, "no_capacity.xlsx")
         shutil.copy(SAMPLE_XLSX, path)
         wb = openpyxl.load_workbook(path)
-        wb["Meta"].delete_rows(2)  # delete the TEMP_C row
+        ws = wb["Meta"]
+        for row in ws.iter_rows():
+            if row[0].value == "capacity_Ah":
+                ws.delete_rows(row[0].row)
+                break
         wb.save(path)
         try:
             load_cell_model_xlsx(path)
             raise AssertionError("should have raised")
         except ValueError as e:
-            assert "TEMP_C" in str(e)
-    print("PASS: missing TEMP_C row raises a clear ValueError")
+            assert "capacity_Ah" in str(e)
+    print("PASS: missing capacity_Ah row raises a clear ValueError")
 
 
 def test_comma_decimal_tolerance():
@@ -148,7 +148,7 @@ def test_comma_decimal_tolerance():
         path = os.path.join(tmp, "comma_decimal.xlsx")
         shutil.copy(SAMPLE_XLSX, path)
         wb = openpyxl.load_workbook(path)
-        wb["Meta"].cell(row=3, column=2, value="3,6")  # voltage_V as comma-decimal text
+        wb["Meta"].cell(row=2, column=2, value="3,6")  # voltage_V as comma-decimal text
         wb.save(path)
         result = load_cell_model_xlsx(path)
         assert np.isclose(result.datasheet_meta["voltage_V"], 3.6)
@@ -162,19 +162,34 @@ def test_datasheet_current_limits_from_meta():
     profile_generation's own defaulting."""
     _require_sample()
 
-    # Not present at all -> both default to inf, nothing leaks into datasheet_meta
+    # The base sample already defines both limits on the Meta sheet.
     result = load_cell_model_xlsx(SAMPLE_XLSX)
-    assert result.datasheet["max_current_charge_A"] == np.inf, \
-        f"expected inf, got {result.datasheet['max_current_charge_A']!r} (datasheet={result.datasheet})"
-    assert result.datasheet["max_current_discharge_A"] == np.inf, \
-        f"expected inf, got {result.datasheet['max_current_discharge_A']!r} (datasheet={result.datasheet})"
+    assert np.isclose(result.datasheet["max_current_charge_A"], 21.0), \
+        f"expected 21.0, got {result.datasheet['max_current_charge_A']!r} (datasheet={result.datasheet})"
+    assert np.isclose(result.datasheet["max_current_discharge_A"], 21.0), \
+        f"expected 21.0, got {result.datasheet['max_current_discharge_A']!r} (datasheet={result.datasheet})"
     assert "max_current_charge_A" not in result.datasheet_meta, \
         f"max_current_charge_A leaked into datasheet_meta: {result.datasheet_meta}"
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Neither present -> both default to inf
+        path0 = os.path.join(tmp, "no_limits.xlsx")
+        shutil.copy(SAMPLE_XLSX, path0)
+        wb0 = openpyxl.load_workbook(path0)
+        rows_to_delete = [row[0].row for row in wb0["Meta"].iter_rows()
+                          if row[0].value in ("max_current_charge_A", "max_current_discharge_A")]
+        for row_idx in sorted(rows_to_delete, reverse=True):
+            wb0["Meta"].delete_rows(row_idx)
+        wb0.save(path0)
+        r0 = load_cell_model_xlsx(path0)
+        assert r0.datasheet["max_current_charge_A"] == np.inf, \
+            f"expected inf, got {r0.datasheet['max_current_charge_A']!r} (datasheet={r0.datasheet})"
+        assert r0.datasheet["max_current_discharge_A"] == np.inf, \
+            f"expected inf, got {r0.datasheet['max_current_discharge_A']!r} (datasheet={r0.datasheet})"
+
         # Both present
         path = os.path.join(tmp, "with_limits.xlsx")
-        shutil.copy(SAMPLE_XLSX, path)
+        shutil.copy(path0, path)
         wb = openpyxl.load_workbook(path)
         wb["Meta"].append(["max_current_charge_A", 10.5])
         wb["Meta"].append(["max_current_discharge_A", 21.0])
@@ -191,7 +206,7 @@ def test_datasheet_current_limits_from_meta():
 
         # Only one present -> the other still defaults to inf
         path2 = os.path.join(tmp, "partial_limits.xlsx")
-        shutil.copy(SAMPLE_XLSX, path2)
+        shutil.copy(path0, path2)
         wb2 = openpyxl.load_workbook(path2)
         wb2["Meta"].append(["max_current_charge_A", 8.0])
         wb2.save(path2)
@@ -217,7 +232,7 @@ def test_datasheet_from_excel_enforced_end_to_end():
         wb.save(path)
 
         result = load_cell_model_xlsx(path)
-        sim_model = make_sim_cell_model(result.cell_model)
+        sim_model = make_sim_cell_model(result)
 
         rng = np.random.default_rng(3)
         n = 200
@@ -239,9 +254,9 @@ def run_all():
         test_load_matches_raw_values,
         test_end_to_end_simulation_with_real_cell_model,
         test_missing_required_sheet,
-        test_mismatched_temperature_columns,
+        test_extra_r0_column_rejected,
         test_mismatched_soc_grid,
-        test_missing_temp_c_row,
+        test_missing_capacity_row,
         test_comma_decimal_tolerance,
         test_datasheet_current_limits_from_meta,
         test_datasheet_from_excel_enforced_end_to_end,
