@@ -3,4 +3,4 @@ __pycache__/
 .mypy_cache/
 venv/
 tests/
-sample_data/PVBESS_Greedy.csv
+sample_data/PVBESS_Greedy_full.csv
